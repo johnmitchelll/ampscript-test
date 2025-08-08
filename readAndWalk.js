@@ -1,5 +1,6 @@
-// inline-css.js
+// inline-css-batch.js
 const fs = require('fs/promises')
+const path = require('path')
 const cheerio = require('cheerio')
 const css = require('css')
 
@@ -32,12 +33,9 @@ function matchesSimple(el, selector, $) {
   return el.tagName && el.tagName.toLowerCase() === selector.toLowerCase()
 }
 
-async function inline(htmlPath, cssPath, outPath) {
-  const html = await fs.readFile(htmlPath, 'utf8')
-  const cssText = await fs.readFile(cssPath, 'utf8')
-  const $ = cheerio.load(html)
+async function inlineOne(htmlText, cssText) {
+  const $ = cheerio.load(htmlText, { decodeEntities: false })
   const ast = css.parse(cssText)
-
   const flatRules = []
   let order = 0
   for (const rule of ast.stylesheet.rules) {
@@ -51,13 +49,11 @@ async function inline(htmlPath, cssPath, outPath) {
       }
     }
   }
-
   const elements = $('*').toArray()
   for (const el of elements) {
     const styleMap = {}
     const existing = parseInlineStyle($(el).attr('style'))
     for (const k of Object.keys(existing)) styleMap[k] = { value: existing[k], spec: 1e9, order: 1e9 }
-
     for (const r of flatRules) {
       if (!matchesSimple(el, r.selector, $)) continue
       for (const d of r.decls) {
@@ -69,25 +65,43 @@ async function inline(htmlPath, cssPath, outPath) {
         }
       }
     }
-
     if (Object.keys(styleMap).length) {
-      const styleString = Object.entries(styleMap)
-        .map(([k, o]) => `${k}: ${o.value}`)
-        .join('; ')
+      const styleString = Object.entries(styleMap).map(([k, o]) => `${k}: ${o.value}`).join('; ')
       $(el).attr('style', styleString)
     }
   }
+  return $.html()
+}
 
-  await fs.writeFile(outPath, $.html(), 'utf8')
+async function walk(dir) {
+  const out = []
+  const entries = await fs.readdir(dir, { withFileTypes: true })
+  for (const e of entries) {
+    const p = path.join(dir, e.name)
+    if (e.isDirectory()) out.push(...await walk(p))
+    else out.push(p)
+  }
+  return out
+}
+
+async function run(publicDir, cssPath) {
+  const cssText = await fs.readFile(cssPath, 'utf8')
+  const files = (await walk(publicDir)).filter(f => f.endsWith('.html') || f.endsWith('.ampscript'))
+  for (const file of files) {
+    const html = await fs.readFile(file, 'utf8')
+    const outHtml = await inlineOne(html, cssText)
+    await fs.writeFile(file, outHtml, 'utf8')
+    console.log('inlined', path.relative(publicDir, file))
+  }
 }
 
 if (require.main === module) {
-  const [htmlPath, cssPath, outPath] = process.argv.slice(2)
-  if (!htmlPath || !cssPath || !outPath) {
-    console.error('Usage: node inline-css.js input.html input.css output.html')
+  const [publicDir, cssPath] = process.argv.slice(2)
+  if (!publicDir || !cssPath) {
+    console.error('Usage: node inline-css-batch.js <publicDir> <styles.css>')
     process.exit(1)
   }
-  inline(htmlPath, cssPath, outPath).catch(e => {
+  run(publicDir, cssPath).catch(e => {
     console.error(e)
     process.exit(1)
   })
